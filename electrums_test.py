@@ -8,7 +8,8 @@ Copyright (c) KmdClassic, 2025
 import json
 import socket
 import sys
-from typing import Dict, Any, Optional
+import time
+from typing import Dict, Any, Optional, Tuple
 
 
 # ANSI color codes for output formatting
@@ -70,7 +71,7 @@ def connect_to_server(host: str, port: int, timeout: int = 10) -> Optional[socke
         return None
 
 
-def send_request(sock: socket.socket, method: str, params: list, request_id: int = 1) -> Optional[Dict[str, Any]]:
+def send_request(sock: socket.socket, method: str, params: list, request_id: int = 1) -> Tuple[Optional[Dict[str, Any]], float]:
     """
     Send JSON-RPC request to Electrum server and read full response.
     
@@ -84,7 +85,7 @@ def send_request(sock: socket.socket, method: str, params: list, request_id: int
         request_id: Request ID for JSON-RPC
         
     Returns:
-        Response dictionary or None if failed
+        Tuple of (Response dictionary or None if failed, elapsed time in seconds)
     """
     # Build JSON-RPC request
     request = {
@@ -96,6 +97,9 @@ def send_request(sock: socket.socket, method: str, params: list, request_id: int
     
     # Convert to JSON string and add newline (Electrum protocol requirement)
     request_json = json.dumps(request) + "\n"
+    
+    # Start timing
+    start_time = time.time()
     
     try:
         # Send request
@@ -139,9 +143,12 @@ def send_request(sock: socket.socket, method: str, params: list, request_id: int
                 print(f"{GRAY}  Socket read error (may be normal): {e}{RESET}")
                 break
         
+        # Calculate elapsed time
+        elapsed_time = time.time() - start_time
+        
         if not response_data:
             print(f"{RED}  No response data received{RESET}")
-            return None
+            return None, elapsed_time
         
         # Decode response
         try:
@@ -149,7 +156,7 @@ def send_request(sock: socket.socket, method: str, params: list, request_id: int
         except UnicodeDecodeError as e:
             print(f"{RED}  Unicode decode error: {e}{RESET}")
             print(f"{GRAY}  Response length: {len(response_data)} bytes{RESET}")
-            return None
+            return None, elapsed_time
         
         # Electrum protocol: messages are separated by newlines
         # Split by newlines and parse each message
@@ -165,7 +172,7 @@ def send_request(sock: socket.socket, method: str, params: list, request_id: int
                 if isinstance(parsed, dict):
                     # Check if it's a response to our request
                     if 'id' in parsed and parsed['id'] == request_id:
-                        return parsed
+                        return parsed, elapsed_time
                     # Also handle notifications (no 'id' field) - but we want the response
                     # If we don't find a matching response, return the first valid JSON
             except json.JSONDecodeError:
@@ -178,7 +185,7 @@ def send_request(sock: socket.socket, method: str, params: list, request_id: int
             full_response = json.loads(response_str.strip())
             if isinstance(full_response, dict) and 'id' in full_response:
                 if full_response['id'] == request_id:
-                    return full_response
+                    return full_response, elapsed_time
         except json.JSONDecodeError:
             pass
         
@@ -189,7 +196,7 @@ def send_request(sock: socket.socket, method: str, params: list, request_id: int
             try:
                 parsed = json.loads(msg)
                 if isinstance(parsed, dict):
-                    return parsed
+                    return parsed, elapsed_time
             except json.JSONDecodeError:
                 continue
         
@@ -197,26 +204,30 @@ def send_request(sock: socket.socket, method: str, params: list, request_id: int
         print(f"{YELLOW}  Warning: Could not find matching response for request ID {request_id}{RESET}")
         print(f"{GRAY}  Received {len(messages)} message(s), total length: {len(response_str)} chars{RESET}")
         print(f"{GRAY}  First 500 chars: {response_str[:500]}{RESET}")
-        return None
+        elapsed_time = time.time() - start_time
+        return None, elapsed_time
         
     except socket.timeout:
+        elapsed_time = time.time() - start_time
         print(f"{RED}  Request timeout{RESET}")
-        return None
+        return None, elapsed_time
     except json.JSONDecodeError as e:
+        elapsed_time = time.time() - start_time
         print(f"{RED}  JSON decode error: {e}{RESET}")
         if response_data:
             response_preview = response_data.decode('utf-8', errors='ignore')[:500]
             print(f"{GRAY}  Response preview (first 500 chars): {response_preview}{RESET}")
             print(f"{GRAY}  Total response length: {len(response_data)} bytes{RESET}")
-        return None
+        return None, elapsed_time
     except Exception as e:
+        elapsed_time = time.time() - start_time
         print(f"{RED}  Request error: {e}{RESET}")
         import traceback
         traceback.print_exc()
-        return None
+        return None, elapsed_time
 
 
-def test_server(server: Dict[str, str]) -> None:
+def test_server(server: Dict[str, str]) -> Optional[Dict[str, Any]]:
     """
     Test an Electrum server with blockchain.transaction.get request.
     
@@ -225,10 +236,27 @@ def test_server(server: Dict[str, str]) -> None:
     
     Args:
         server: Server configuration dictionary
+        
+    Returns:
+        Dictionary with timing results or None if failed
     """
     host = server["host"]
     port = server["port"]
     name = server["name"]
+    
+    # Timing results
+    timing_results = {
+        "name": name,
+        "host": f"{host}:{port}",
+        "connection_time": None,
+        "version_time": None,
+        "transaction_time": None,
+        "total_time": None,
+        "success": False
+    }
+    
+    # Start total timing
+    total_start_time = time.time()
     
     print(f"\n{BOLD}{'=' * 80}{RESET}")
     print(f"{BOLD}Testing: {CYAN}{name}{RESET}")
@@ -237,24 +265,33 @@ def test_server(server: Dict[str, str]) -> None:
     
     # Connect to server
     print(f"\n{YELLOW}[1/4]{RESET} Connecting to {host}:{port}...")
+    connection_start = time.time()
     sock = connect_to_server(host, port)
+    timing_results["connection_time"] = time.time() - connection_start
     
     if not sock:
         print(f"{RED}✗ Failed to connect to server{RESET}")
-        return
+        timing_results["total_time"] = time.time() - total_start_time
+        return timing_results
     
     print(f"{GREEN}✓ Connected successfully{RESET}")
+    print(f"  Connection time: {GRAY}{timing_results['connection_time']:.3f}s{RESET}")
     
     # Version negotiation - MUST be the first message according to protocol
     print(f"\n{YELLOW}[2/4]{RESET} Negotiating protocol version (server.version)...")
     # Client name and supported protocol versions
     # Using a wide range of versions for compatibility
-    version_response = send_request(sock, "server.version", ["ElectrumTestScript/1.0", "1.4"])
+    version_response, version_time = send_request(sock, "server.version", ["ElectrumTestScript/1.0", "1.4"])
+    timing_results["version_time"] = version_time
     
     if not version_response:
         print(f"{RED}✗ Failed to negotiate protocol version{RESET}")
+        print(f"  Time elapsed: {GRAY}{version_time:.3f}s{RESET}")
         sock.close()
-        return
+        timing_results["total_time"] = time.time() - total_start_time
+        return timing_results
+    
+    print(f"  Response time: {GRAY}{version_time:.3f}s{RESET}")
     
     # Check for errors in version negotiation
     if "error" in version_response:
@@ -263,7 +300,8 @@ def test_server(server: Dict[str, str]) -> None:
         print(f"  Code: {error.get('code', 'N/A')}")
         print(f"  Message: {error.get('message', 'N/A')}")
         sock.close()
-        return
+        timing_results["total_time"] = time.time() - total_start_time
+        return timing_results
     
     # Display negotiated version
     version_result = version_response.get("result")
@@ -285,16 +323,20 @@ def test_server(server: Dict[str, str]) -> None:
     print(f"  Transaction hash: {GRAY}{TX_HASH}{RESET}")
     
     # Electrum blockchain.transaction.get method with verbose=True
-    response = send_request(sock, "blockchain.transaction.get", [TX_HASH, True], request_id=2)
+    response, transaction_time = send_request(sock, "blockchain.transaction.get", [TX_HASH, True], request_id=2)
+    timing_results["transaction_time"] = transaction_time
     
     # Close socket
     sock.close()
     
     if not response:
         print(f"{RED}✗ Failed to get response from server{RESET}")
-        return
+        print(f"  Time elapsed: {GRAY}{transaction_time:.3f}s{RESET}")
+        timing_results["total_time"] = time.time() - total_start_time
+        return timing_results
     
     print(f"{GREEN}✓ Received response{RESET}")
+    print(f"  Response time: {GRAY}{transaction_time:.3f}s{RESET}")
     
     # Display results
     print(f"\n{YELLOW}[4/4]{RESET} Response:")
@@ -315,11 +357,17 @@ def test_server(server: Dict[str, str]) -> None:
             print(f"{GREEN}Success! Transaction data:{RESET}\n")
             # Pretty print the JSON response
             print(json.dumps(result, indent=2, ensure_ascii=False))
+            timing_results["success"] = True
         else:
             print(f"{YELLOW}Warning: Response has no result field{RESET}")
             print(f"Full response: {json.dumps(response, indent=2, ensure_ascii=False)}")
     
     print(f"{BOLD}{'─' * 80}{RESET}")
+    
+    # Calculate total time
+    timing_results["total_time"] = time.time() - total_start_time
+    
+    return timing_results
 
 
 def main():
@@ -331,10 +379,15 @@ def main():
     print(f"Method: {GRAY}blockchain.transaction.get (verbose=True){RESET}")
     print(f"Servers to test: {len(SERVERS)}")
     
+    # Store timing results for all servers
+    all_timing_results = []
+    
     # Test each server
     for i, server in enumerate(SERVERS, 1):
         try:
-            test_server(server)
+            timing_result = test_server(server)
+            if timing_result:
+                all_timing_results.append(timing_result)
         except KeyboardInterrupt:
             print(f"\n\n{RED}Interrupted by user{RESET}")
             sys.exit(1)
@@ -342,6 +395,52 @@ def main():
             print(f"\n{RED}Unexpected error testing {server['name']}: {e}{RESET}")
             import traceback
             traceback.print_exc()
+            # Add failed result
+            all_timing_results.append({
+                "name": server["name"],
+                "host": f"{server['host']}:{server['port']}",
+                "connection_time": None,
+                "version_time": None,
+                "transaction_time": None,
+                "total_time": None,
+                "success": False
+            })
+    
+    # Display timing summary
+    print(f"\n{BOLD}{BLUE}{'=' * 80}{RESET}")
+    print(f"{BOLD}{BLUE}Timing Summary{RESET}")
+    print(f"{BOLD}{BLUE}{'=' * 80}{RESET}\n")
+    
+    if all_timing_results:
+        # Table header
+        print(f"{BOLD}{'Server':<40} {'Connection':<12} {'Version':<12} {'Transaction':<12} {'Total':<12} {'Status':<10}{RESET}")
+        print(f"{BOLD}{'─' * 100}{RESET}")
+        
+        # Display results for each server
+        for result in all_timing_results:
+            name = result["name"][:38]  # Truncate if too long
+            conn_time = f"{result['connection_time']:.3f}s" if result['connection_time'] is not None else "N/A"
+            ver_time = f"{result['version_time']:.3f}s" if result['version_time'] is not None else "N/A"
+            tx_time = f"{result['transaction_time']:.3f}s" if result['transaction_time'] is not None else "N/A"
+            total_time = f"{result['total_time']:.3f}s" if result['total_time'] is not None else "N/A"
+            status = f"{GREEN}✓ Success{RESET}" if result['success'] else f"{RED}✗ Failed{RESET}"
+            
+            print(f"{name:<40} {conn_time:<12} {ver_time:<12} {tx_time:<12} {total_time:<12} {status}")
+        
+        print(f"{BOLD}{'─' * 100}{RESET}\n")
+        
+        # Find fastest server
+        successful_results = [r for r in all_timing_results if r['success'] and r['total_time'] is not None]
+        if successful_results:
+            fastest = min(successful_results, key=lambda x: x['total_time'])
+            print(f"{BOLD}Fastest server: {GREEN}{fastest['name']}{RESET} (Total: {fastest['total_time']:.3f}s)")
+            
+            # Compare transaction times
+            if len(successful_results) > 1:
+                tx_times = [(r['name'], r['transaction_time']) for r in successful_results if r['transaction_time'] is not None]
+                if tx_times:
+                    fastest_tx = min(tx_times, key=lambda x: x[1])
+                    print(f"{BOLD}Fastest transaction response: {GREEN}{fastest_tx[0]}{RESET} ({fastest_tx[1]:.3f}s)")
     
     print(f"\n{BOLD}{BLUE}{'=' * 80}{RESET}")
     print(f"{BOLD}{GREEN}Testing completed{RESET}")
